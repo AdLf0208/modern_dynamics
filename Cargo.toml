@@ -1,0 +1,18 @@
+[package]
+# Ported from: Modern Dynamics 0.9.6 (Technici4n/Modern-Dynamics, LGPL-3.0-only),
+# Minecraft Java 1.21.1 NeoForge. Local-only until the maintainer approves
+# publishing; a published port travels under LGPL-3.0 with its complete source.
+name = "horizon-moderndynamics"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "LGPL-3.0-only"
+description = "Modern Dynamics for Horizon: an item pipe with an extractor attachment"
+
+[lib]
+# This exact source is also injected as a same-crate module by horizon-mixins.
+path = "mixins/moderndynamics/runtime.rs"
+
+[workspace]
+members = ["tools/audit"]
+resolver = "2"

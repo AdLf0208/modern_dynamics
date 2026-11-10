@@ -1,0 +1,22 @@
+{
+  "template": "minecraft:stone",
+  "properties": {
+    "hardness": 0.2,
+    "requires_tool": false,
+    "sounds": "minecraft:stone",
+    "occludes": false,
+    "render_shape": "MODEL"
+  },
+  "state_properties": {
+    "down": { "type": "boolean" },
+    "up": { "type": "boolean" },
+    "north": { "type": "boolean" },
+    "south": { "type": "boolean" },
+    "west": { "type": "boolean" },
+    "east": { "type": "boolean" }
+  },
+  "shapes": {
+    "default": [[0.3125, 0.3125, 0.3125, 0.6875, 0.6875, 0.6875]]
+  },
+  "item": true
+}

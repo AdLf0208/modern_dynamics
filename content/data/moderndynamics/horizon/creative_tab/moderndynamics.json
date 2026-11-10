@@ -1,0 +1,8 @@
+{
+  "title": "Modern Dynamics",
+  "icon": "moderndynamics:item_pipe",
+  "items": [
+    "moderndynamics:item_pipe",
+    "moderndynamics:extractor"
+  ]
+}
