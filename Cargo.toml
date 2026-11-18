@@ -1,0 +1,21 @@
+[package]
+# Port of Modern Dynamics 0.9.6 (Technici4n/Modern-Dynamics, commit
+# e8e40f02966406acca712fbd36ee847f70bd528e, LGPL-3.0-only). Minecraft Java
+# 1.21.1 NeoForge; the port targets Horizon 26.3 at the pin in
+# horizon-mod.toml. Clean-room Rust rewrite from the mod's behaviour
+# (FINDINGS.md); local-only until publishing is approved, publishable under
+# LGPL-3.0 with this complete corresponding source.
+#
+# Cargo's name and version are not the mod's identity: horizon-mod.toml is.
+name = "moderndynamics"
+version = "0.2.0"
+edition = "2024"
+license = "LGPL-3.0-only"
+description = "Modern Dynamics for Horizon: an item pipe with an extractor attachment"
+publish = false
+
+[dependencies]
+# The pinned SDK's API crate, fetched into .horizon/sdk/ by any `cargo horizon-mod` command (the
+# launcher builds against its own copy of the same build). Any other registry dependency must be
+# pinned with `horizon-launcher native-lock .` before building.
+horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }

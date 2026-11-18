@@ -1,0 +1,20 @@
+{
+  "textures": {
+    "0": "moderndynamics:pipe/item_pipe/base",
+    "1": "moderndynamics:pipe/item_pipe/straight",
+    "particle": "moderndynamics:pipe/item_pipe/base"
+  },
+  "elements": [
+    {
+      "from": [5, 0, 5],
+      "to": [11, 5, 11],
+      "faces": {
+        "north": { "texture": "#1" },
+        "east": { "texture": "#1" },
+        "south": { "texture": "#1" },
+        "west": { "texture": "#1" },
+        "down": { "texture": "#0" }
+      }
+    }
+  ]
+}
