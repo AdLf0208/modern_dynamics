@@ -3,6 +3,7 @@
   "icon": "moderndynamics:item_pipe",
   "items": [
     "moderndynamics:item_pipe",
-    "moderndynamics:extractor"
+    "moderndynamics:extractor",
+    "moderndynamics:attractor"
   ]
 }

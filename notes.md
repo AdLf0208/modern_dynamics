@@ -15,6 +15,13 @@ joins through the **extractor** attachment (`moderndynamics:extractor`) at
 upstream's defaults. Fluid/energy pipes, the attractor/filter/inhibitor, the
 wrench, upgrades, the screen and the rest of the mod are gaps.
 
+**Slice 2 (2026-11-21).** The **attractor** attachment
+(`moderndynamics:attractor`): the reverse of the extractor — it pulls from the
+pipe network into the inventory on its side — at SDK nightly `0a875da`,
+package **0.2.2**. The whole slice, its red→green, its in-game transcript and
+its coverage table are in [`## Slice 2 — the attractor`](#slice-2--the-attractor-package-022)
+at the end of this file.
+
 **Class + tier:** `content` / **`machines`** (`ports/ledger.csv`; provenance
 `ports/_shared/source-map/atm10-sources.csv` row `moderndynamics`). Approach
 per Horizon's `docs/modpacks.md`: a machines mod is a block entity plus a
@@ -246,10 +253,12 @@ cargo horizon-mod fits moderndynamics.hmod --build nightly
 
 1. **Fluid pipe, the five energy cables (LV…EV, superconductor) and the machine
    extender** are not ported.
-2. **Attractor, filter and inhibitor** attachments, the **wrench** (connection
-   blacklist, attachment removal, off-hand rules), the attachment **screen**
-   (filters, oversending, max items, redstone mode) and the attachment **upgrade**
-   data (speed, count, frequency).
+2. **Filter and inhibitor** attachments, the **wrench** (connection blacklist,
+   attachment removal, off-hand rules), the attachment **screen** (filters,
+   oversending, max items, redstone mode) and the attachment **upgrade** data
+   (speed, count, frequency). The **attractor** was this gap's first item and is
+   now ported (slice 2); the filter is the next one, because its whole content is
+   configuration the screen would carry.
 3. **Routing modes** other than `CLOSEST` (FURTHEST, RANDOM, ROUND_ROBIN),
    priorities, and the stuffed-item retry path.
 4. **Item travel** rendering, per-type pipe textures on the arms, waterlogging,
@@ -332,6 +341,133 @@ Every compile/test step ran through `ports/tools/build-slot.sh` (`BUILD_LOCAL=1`
   script is archived rather than rewritten.
 
 Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices,rust-port
+
+## Review fixes (2026-11-18) — the registry's source review, package 0.2.1
+
+The reviewer's file is `var/review/1202-moderndynamics.md` (**held: this blocked listing**). Every
+item below is a change in the tree plus the test or run that pins it. New package:
+**`moderndynamics.hmod` — 34,206 B, sha256 `af740f062fc54a97489f5d52dd01fd931e4987098a72083ba479c9622807f976`**,
+25 entries, `check` = `moderndynamics 0.2.1 (native-mod, …)`, `fits --build nightly` = `0b14f8a made for`.
+
+### 1. The carried art was upstream's, under CC-BY-NC-SA-4.0 (the licence finding)
+
+**Reproduced.** The entry says LGPL-3.0-only, but the upstream repository's README puts the **art**
+under CC-BY-NC-SA-4.0 while the code is LGPL-3.0. Comparing the 0.2.0 package's files against the
+jar by sha256 found **seven** jar-identical files, not only the three the reviewer named:
+
+| file | what it was |
+|---|---|
+| `textures/pipe/item_pipe/base.png`, `…/straight.png`, `textures/item/extractor.png` | upstream art (the three the reviewer cited) |
+| `models/item/extractor.json` | the jar's own bytes |
+| `loot_table/blocks/item_pipe.json` | the jar's own bytes |
+| `recipe/extractor.json`, `recipe/item_pipe.json` | the jar's own bytes |
+
+**Fixed the campaign way (ARCHITECTURE §8, the twilightforest ruling): regenerate the art, never carry
+it.**
+
+- `tools/gen_textures.py` **draws** the three textures from a fixed palette and closed-form patterns
+  (a 32×32 steel plate with a bevelled rim and four rivets; a 32×32 arm band with a brass groove and
+  an eight-pixel seam; a 16×16 brass funnel — ring, throat, nozzle). No randomness, no upstream file,
+  `--check` re-renders and compares byte for byte.
+- `tools/assemble_content.py` **rewrites** the item model, the loot table and both recipes from what
+  they express (same ingredients, pattern, drop and model layer) in this port's own key order,
+  indentation and trailing newline — the twilightforest "rewritten-from-semantics" category.
+- `tools/check_provenance.py` is the machine check: it compares the sha256 of **every** packaged file
+  against **every** entry of the jar and asserts **0 matches**, then writes `PROVENANCE.md` (one line
+  per file, naming the generator or the rewrite).
+- `LICENSE-NOTICE.md` and `README.md` now say the art is the port's own, why, and how to regenerate it.
+
+**Pinned by:** `tools/check_provenance.py --check`. It is fail-capable and was **watched failing** on
+the 0.2.0 package — `ports/_shared/evidence/moderndynamics/provenance-red-0.2.0.log`: `7 identical to a
+jar entry`, exit 1. On 0.2.1: `25 packaged files; 0 identical to a jar entry`, exit 0
+(`evidence/moderndynamics/provenance-green-0.2.1.log`).
+
+### 2. `/moderndynamics attach|detach` edited any pipe with no reach, no ownership and no cost
+
+**Reproduced** (`src/lib.rs:470` in 0.2.0): the two usages were plain `Command::new`, so any player
+could put an extractor on — or strip one off — another player's pipe anywhere in the level, for free.
+
+**Fixed** with the operator gate the level's own administrative commands use, plus the item cost:
+
+- both usages are registered with **`Command::op(…, ADMIN_LEVEL)`** (`ADMIN_LEVEL = 2`, the level
+  `/setblock` needs), so the server's command tree refuses them below it;
+- the body re-checks `event.source.permission().level() >= 2` (defence in depth — a merged tree is not
+  a guarantee a body may lean on) and answers `… needs an operator (permission level 2)`;
+- an `attach` **from a player** takes one extractor from that player's main hand, in **one
+  transaction** with the mask write (a refused placement never eats an item; a lost item never leaves
+  a free extractor), exactly as the right-click path charges it. A source with no hand (console,
+  command block, function) places without cost, as `/setblock` does. A **detach** costs nothing and
+  returns nothing, as upstream's wrench takes the item off.
+- `info` stays level 0: it only reads the caller-named pipe this mod owns.
+
+**Pinned by:** `the_administrative_sides_need_an_operator` (runtime, `ADMIN_LEVEL` and
+`may_administer` at 0/1/2/4) and, in game, the e2e's two new phases — the attach on a **fresh** pipe at
+`56,100,0` must take exactly one extractor outside creative (survival: hand goes N→N−1), and an attach
+with an **empty** hand must answer `no extractor in hand` and leave the mask at `extractors east`
+(no `west`).
+
+### 3. Each active extractor rebuilt and walked the whole network, quadratically
+
+**Reproduced** (`src/lib.rs:262`, `:190`, `src/runtime.rs:164` in 0.2.0): `network_of` and
+`reachable` asked a `Vec` for membership twice per link (`found.contains`, `pipes.contains`), so one
+operation was quadratic in the network's size, with **no cap at all** — a long pipe line on the server
+thread.
+
+**Fixed:**
+
+- `reachable` returns a **`Reach`** that carries whether the walk finished, and stops at
+  **`MAX_NETWORK_PIPES = 256`** (the nearest pipes, because the walk is breadth-first, so
+  nearest-first ordering survives the cap);
+- membership is a `BTreeSet` in both the runtime walk and the glue's `network_of` (which keeps the
+  same cap), so a link is looked up in log time instead of a linear scan;
+- `run_extractors` resolves the **extracting sides first** and returns before any walk when none faces
+  an inventory, so a pipe whose extractor faces air costs six neighbour reads, not a network walk.
+
+**Pinned by:** `a_walk_stops_at_the_network_budget` — a 5,000-pipe line: the walk keeps exactly 256
+pipes, reports `complete() == false`, and the `linked` predicate is called at most `6 × 256` times
+(the quadratic version looked at every pipe on every link). `a_walk_that_fits_is_complete_and_finds_every_pipe`
+keeps the old behaviour for a network inside the budget.
+
+### 4. Upstream defect fixed: both recipes could never load at 26.3
+
+**Proved from the artefact and the engine.** The jar's recipe files write an ingredient as
+`{"item": "minecraft:glass"}`, the 1.21.1 NeoForge object form. At 26.3 an ingredient object must
+carry a `type`/`neoforge:ingredient_type` (`crates/horizon-mod-vocab/src/__private/ingredient_parser.rs:186`,
+`let kind = ingredient_kind(o)?`), and a plain item is the **string** form — vanilla's own
+`data/minecraft/recipe/glass_pane.json` in the prepared 26.3 resources writes `"#": "minecraft:glass"`.
+Carried as-is, the engine logged `recipes: invalid ingredient (unresolved tag or malformed input)` for
+all six ingredients and **neither recipe loaded** (measured in the first in-game run at
+`~/.cache/horizon-e2e/…/e2e-launcher.log`, before the fix).
+
+**Fixed** in `tools/assemble_content.py`: ingredients are the 26.3 string form (`"minecraft:glass"`,
+`"#tag"`), same pattern, same counts, same result shape. A player notices the pipe (8 per craft) and
+the extractor are craftable again. Not an upstream report: 1.21.1 data is correct for 1.21.1.
+`notes.md` records it here under the campaign's "fix, never reproduce" ruling.
+
+**Pinned by:** the in-game run loads with **0** `invalid ingredient` lines (grep over the final
+`e2e-launcher.log`) and the recipe is craftable — the same run that proves the behaviour.
+
+### Ladder and in-game leg for 0.2.1
+
+| Step | Command | Result |
+|---|---|---|
+| runtime RED | `cargo test --lib` before the budget/auth code | `error[E0433]: cannot find type Reach`, 12 errors — `evidence/moderndynamics/review-red-budget.log` |
+| unit tests | `cargo test --lib --offline` | **13 passed**, 0 failed (was 10; +3) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings |
+| formatting | `cargo fmt --check` | clean (`runtime.rs` compared after the pass) |
+| package | `cargo horizon-mod build` (+ `cp`), twice | `34,206 B`, sha256 `af740f06…07f976`, **byte-identical** runs |
+| registry check | `cargo horizon-mod check moderndynamics.hmod` | `moderndynamics 0.2.1 (native-mod, format native-1/0b14f8a…/e59da90…, for 26.3)`, 34206 bytes, EXIT 0 |
+| fits | `cargo horizon-mod fits moderndynamics.hmod --build nightly` | `0b14f8a made for`, EXIT 0 |
+| provenance | `python3 tools/check_provenance.py --check` | `25 packaged files; 0 identical to a jar entry`, EXIT 0 |
+| in-game | `ports/tools/launcher-game.sh run moderndynamics` | **PASS** + `EXIT:0` — `evidence/moderndynamics-e2e/e2e-launcher.log` |
+| control | `GAME=$CONTROL_GAME` (the same Nightly, no package) | `FAIL: the game does not know moderndynamics:item_pipe…` + `EXIT:1` — `…-control.log` |
+| selftest | `SELFTEST=1` | `FAIL: SELFTEST: the target chest holds 20 stone…` + `EXIT:1` — `…-selftest.log` |
+| log gate | `check-e2e-logs.py moderndynamics-e2e --strict` | `logs=3 ok=3 missing-exit=0 bad-exit=0`, exit 0 |
+
+**Trap recorded:** `horizon-launcher native-build` reuses a build while the package's **version** is
+unchanged, so edits inside one version are invisible until the old `versions/native-…` folder and the
+export are removed (or the version bumped). Two in-game runs failed on stale data before this was
+noticed.
 
 ## Verification
 
@@ -498,3 +634,206 @@ Each item below is quoted from `ports/_shared/horizon-mods/reviews/pr-*-moderndy
   **Repair:** **Staging (orchestrator, not ours)**: the artifact is not in registry release/staging as `<sha256>.<ext>`; the orchestrator answers it with `horizon-mods#686` (no write access to the registry's releases). Every repackaged artifact below has a fresh sha256 for that re-push, and the author release must be re-uploaded from the port repository.
 
 Skills: superpowers/using-superpowers,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
+
+## Slice 2 — the attractor (package 0.2.2)
+
+*Written 2026-11-21 at the campaign pin **Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`**
+(Nightly 2026-11-20) + mixins `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`; the port was repinned from
+`0b14f8a` in this slice.*
+
+**The slice.** Gap list item 2 said *"**Attractor**, filter and inhibitor attachments, the **wrench** …, the
+attachment **screen** … and the attachment **upgrade** data"*. The attractor is that gap's first item: the
+**reverse of the extractor**, and the attachment that makes a pipe useful without a source machine to pull
+from. Tier `machines` unchanged (a capability move on the pipe's own tick; no renderer, no screen, no new
+block).
+
+### Upstream behaviour the slice implements
+
+Read from `Technici4n/Modern-Dynamics` commit `e8e40f02966406acca712fbd36ee847f70bd528e` (no Java copied;
+see `FINDINGS.md`):
+
+- `network/item/ItemHost.java::tickAttractor` — every `getItemOperationTickDelay()` (40 ticks unupgraded) an
+  attractor walks the network's paths from its own pipe, and for each path **extracts** from the inventory at
+  the path's end into `SimulatedInsertionTargets.getTarget(pipe.relative(side))`, the inventory **on its own
+  side**. `maxItemsExtracted` defaults to `getMaxItemsExtractedMaximum()` = `getItemsPerOperation()` = 4.
+- It skips a path whose end attachment is another `ATTRACTOR` ("Don't allow attractors to pull from other
+  attractors"), and `ItemPathCache.computePaths` never offers an **extractor's** side as a path end
+  (`AttachedAttachment.allowsItemConnection()` is false for a servo only) — an attractor's side, by contrast,
+  **is** a valid end, which is how extractors push into a machine that faces an attractor.
+- `IoAttachmentItem` + `IoAttachmentType` — one attachment per side, kind named by the item
+  (`attractor`/`extractor`), so placement is the same right-click on a pipe side with either item.
+
+### What the port does now
+
+- `src/runtime.rs` — `AttachmentKind { Extractor, Attractor }` (`name()`, `named()`), and `Attachments`
+  carries **two masks** (`extractor_mask()`/`attractor_mask()`, one kind per side, `from_saved(extractors,
+  attractors)` with the six-side sanitiser and "extractor wins a damaged save" so a side never has two).
+  `accepts_endpoints(face)` is upstream's `allowsItemConnection`; `attractor_sources(reach, endpoints,
+  source, is_attractor_site)` is the nearest-first source order minus the attractor's own side and minus
+  other attractors' sides.
+- `src/lib.rs` — the block entity saves `attachments` (extractors, the slice-1 key, so old pipes keep their
+  servos) **and** `attractors`; `endpoints()` skips extractor sides; `run_attractors()` mirrors
+  `run_extractors()` on the same 40-tick position phase and 4-item budget, moving through
+  `move_resources` in a transaction so a refused item stays where it was. The right-click takes its kind from
+  the held item, and `/moderndynamics attach <pos> <side> [kind]` gained the optional kind (`extractor` when
+  omitted, so the slice-1 form still works); `detach` clears whichever kind is there; `info` prints
+  `extractors …; attractors …`.
+- Content: `moderndynamics:attractor` item (`minecraft:paper` template), its 26.3 item definition and model,
+  a **drawn** texture (`tools/gen_textures.py`, `attractor_face()`: a brass suction port — ring + hub —
+  the opposite reading of the extractor's funnel), the jar's recipe (` e `/`mrm`/` p ` → 1: ender pearl over
+  iron/redstone/iron over paper, rewritten from its semantics by `tools/assemble_content.py`), the lang key
+  and the creative tab entry.
+
+### Upstream defects fixed / port defects fixed
+
+- **Port defect (this slice): the pipe's loot table was in the 1.21.1 shape and the pipe dropped nothing.**
+  `check_261_dialect.py` flagged `pools[0].conditions` as the list form — one of the three
+  game-confirmed-fatal data shapes — plus `bonus_rolls` and `"rolls": 1.0`. Rewritten in
+  `tools/assemble_content.py` to 26.3's shape (one typed `"condition": {"type":
+  "minecraft:survives_explosion"}`, integral `rolls`, no `bonus_rolls`), which is exactly vanilla 26.3's
+  `data/minecraft/loot_table/blocks/hopper.json`. **Proved in game:** breaking a pipe in survival now
+  reports `"drops":{"moderndynamics:item_pipe":1}` (e2e, `== the pipe drops itself`).
+- **Brought to upstream's rule: an extractor's side is not a network endpoint.** Slice 1 listed every
+  inventory-facing side as an endpoint, so two extractors on one pipe would have sent into each other's
+  chests; upstream never offers a servo's side as a path end. `endpoints()` now skips extractor sides
+  (`accepts_endpoints`), unit-tested by `an_extractor_side_is_never_a_network_endpoint`.
+- No upstream defect was invented for the attractor: its behaviour at 0.9.6 is self-consistent, so the
+  port reproduces it with the deviations below.
+
+### Deliberate deviations (attractor)
+
+| Upstream | Here | Why |
+|---|---|---|
+| Each attachment keeps its own `lastOperationTick[side]` | the same 40-tick cadence derived from the pipe's position | unchanged slice-1 deviation (the pin reverts block-entity writes made inside a tick); rate and batch are upstream's |
+| a traveling item's insertion is simulated first (`SimulatedInsertionTargets`) and refusals become **stuffed** items on the attachment | `move_resources` moves in one transaction; a refused item stays in its source | no item travel / stuffed buffer in this slice (gap 3); nothing is lost |
+| routing modes, filters, redstone mode, upgrades | CLOSEST, empty filter, IGNORED, none | screen and upgrade data are gaps |
+| the attractor's model/screen on the pipe side | the item only (`info` reads the side) | no attachment renderer in this slice |
+
+### Red → green
+
+**RED** (the rule as a test before the API existed), `evidence/moderndynamics/red-attractor-api.log`:
+
+```
+error[E0433]: cannot find type `AttachmentKind` in this scope
+error[E0599]: no method named `accepts_endpoints` found for struct `runtime::Attachments` in the current scope
+error[E0425]: cannot find function `attractor_sources` in this scope
+error: could not compile `moderndynamics` (lib test) due to 41 previous errors
+```
+
+**GREEN**: `cargo test --lib --offline` → **15 passed; 0 failed** (was 13; the two new rules are
+`an_attractor_pulls_nearest_first_and_never_from_another_attractor`,
+`an_extractor_side_is_never_a_network_endpoint`, and `a_side_carries_at_most_one_attachment_and_names_its_kind`
+replaces the slice-1 mask test with the same round-trip plus kinds).
+
+### Ladder and in-game leg for 0.2.2
+
+Every compile step ran through `ports/tools/build-slot.sh` with `BUILD_LOCAL=1` (the SDK tool is only
+installed on this box) and `CARGO_INCREMENTAL=0`; evidence in
+[`../_shared/evidence/moderndynamics/`](../_shared/evidence/moderndynamics/), each log quoting the sha256 of
+the delivered file it ran against.
+
+| Step | Command | Result |
+|---|---|---|
+| repin | `[native] horizon = 0a875da…` + `.horizon/` deleted | SDK fetched at `0a875da` (`sdk-fetch-0a875da.log`), no source edit needed (no changed hook is used) |
+| runtime RED | `cargo test --lib --offline` | `EXIT:101`, 41 errors (`red-attractor-api.log`) |
+| unit tests | `cargo test --lib --offline` | **15 passed**, 0 failed (`sdk-test.log`) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| formatting | `cargo fmt --check` | clean (`sdk-fmt.log`) |
+| package, build A | `rm -f Cargo.lock && cargo horizon-mod build` | **38,469 B**, sha256 `2b848091f46272db89c2d7ed2a91e6a075c63486b3898704a746f5e8b940bf05` (`sdk-build-a.log`) |
+| package, build B | the same, second time | same size and sha; `cmp` against build A is clean (`sdk-build-b.log`, `sdk-build-cmp.log`) |
+| registry check | `cargo horizon-mod check moderndynamics.hmod` | `moderndynamics 0.2.2 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 38469 bytes, EXIT 0 (`sdk-check.log`, `sdk-check-json.log`) |
+| fits, the pin | `cargo horizon-mod fits moderndynamics.hmod --build 0a875da` | `0a875da  made for`, EXIT 0 (`sdk-fits-0a875da.log`) |
+| fits, another build | `… --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 (`sdk-fits-0b14f8a.log`) |
+| surface used | `cargo horizon-mod check … --uses` | 306 entries (`sdk-uses.log`, `uses.json` in the package) |
+| data dialect | `python3 ../tools/check_261_dialect.py moderndynamics.hmod` | 4/4 in the 26.3 dialect, EXIT 0 (`sdk-dialect.log`) |
+| provenance | `python3 tools/check_provenance.py --check` | `30 packaged files; 0 identical to a jar entry` (`sdk-provenance.log`) |
+| gate | `python3 ports/tools/verify-sdk-package.py moderndynamics` | **1/1** (`sdk-package.txt`) |
+| in-game | `launcher-game.sh build moderndynamics` (`Compiling moderndynamics (1 of 1)`) then the leg | **PASS** + `EXIT:0` (`../_shared/evidence/moderndynamics-e2e/e2e-launcher.log`) |
+| control | `GAME=$CONTROL_GAME` (the same Nightly, no package) | `FAIL: the game does not know moderndynamics:item_pipe…` + `EXIT:1` (`…-control.log`) |
+| selftest | `SELFTEST=1` | `FAIL: SELFTEST: the target chest holds 20 stone, so the check is alive` + `EXIT:1` (`…-selftest.log`) |
+| log gate | `check-e2e-logs.py moderndynamics-e2e --strict` | `logs=3 ok=3 missing-exit=0 bad-exit=0`, exit 0 |
+
+Package contents: **30 entries**, no `Cargo.lock`; `src/runtime.rs` in the package is the tree's file byte
+for byte. `README.md`, `LICENSE-NOTICE.md` and the manifest are inside, so they were final before build A.
+
+### In-game transcript (from `evidence/moderndynamics-e2e/e2e-launcher.log`, abridged)
+
+```
+== R: every carried recipe crafts in a real crafting table ==
+PASS attractor: 1 moderndynamics:attractor, the grid emptied and the 5 ingredients were consumed
+PASS extractor: 1 moderndynamics:extractor, the grid emptied and the 5 ingredients were consumed
+PASS item_pipe: 8 moderndynamics:item_pipe, the grid emptied and the 3 ingredients were consumed
+PASS negative: attractor grid with lapis instead of an ender pearl crafts nothing
+== A: an extractor moves 20 stone from the west chest to the east chest ==
+  Item Pipe at 1,100,0: extractors west; attractors none; 4 items every 40 ticks
+  pipe state: moderndynamics:item_pipe[down=false,east=true,north=false,south=false,up=false,west=true]
+  4 operations in 7 s: source 0, target 20
+== G: an attractor pulls 20 stone into the chest on its own side ==
+  Item Pipe at 66,100,0: extractors none; attractors east; 4 items every 40 ticks
+  4 operations in 7 s: attractor source 0, target 20
+== G2: the same geometry with an extractor moves the items the other way (differential) ==
+  Item Pipe at 74,100,0: extractors east; attractors none; 4 items every 40 ticks
+  chest 75 (the extractor's side): 0, chest 72 (the far end): 4
+== G3: two attractors move nothing (an attractor never pulls from another) ==
+  Item Pipe at 81,100,0: extractors none; attractors west; 4 items every 40 ticks
+  Item Pipe at 82,100,0: extractors none; attractors east; 4 items every 40 ticks
+  source: 4, target: 0
+== the pipe drops itself when broken (its loot table) ==
+  {"block":"minecraft:air",…,"drops":{"moderndynamics:item_pipe":1}}
+== the administrative paths: cost, detach, and a refusal ==
+  Item Pipe at 56,100,0: extractors none; attractors east; 4 items every 40 ticks
+  Item Pipe at 56,100,0: extractors none; attractors none; 4 items every 40 ticks
+== both attachments are saved with their pipes across a relaunch ==
+  Item Pipe at 1,100,0: extractors west; attractors none; 4 items every 40 ticks
+  Item Pipe at 66,100,0: extractors none; attractors east; 4 items every 40 ticks
+PASS: every carried recipe crafts its declared output and consumes its ingredients (the attractor's grid
+with lapis crafts nothing), an extractor moved 20 stone into the far chest while an attractor pulled 20
+stone into its own and the extractor on the same geometry moved items the other way, two attractors moved
+nothing, a pipe broken in survival dropped itself, the administrative attach cost one attachment and a
+detach cleared the side, both attachments survived a relaunch, and chests with no pipe / a disconnected
+pipe / a full target / a pipe without an attachment moved nothing
+EXIT:0
+```
+
+What the leg proves that a unit test cannot: the attractor's **direction** (G: the far chest empties, its own
+chest fills) against the **same geometry with an extractor** (G2: the chest the attachment faces empties and
+the far one fills) — one variable, opposite result; the 4-per-40-ticks batch of the attractor from its own
+operation sampling; the "never pull from another attractor" rule (G3); the crafted items are the items the
+placement paths use; and both kinds survive a relaunch (two masks in the saved compound).
+
+### Harness lessons (measured this slice, for the next one)
+
+- **`ctl messages` lists chat `newest first`**, and one `/moderndynamics info` call answers **two** lines
+  (`links …`, then `extractors …; attractors …`), so an assertion reads `head -2` of the lines about that
+  pipe — the slice-1 form (`tail -1`) picked the oldest line and failed on a pipe that was correct.
+- **`ctl tp` moves the client, and a survival server corrects it back** ("moved wrongly" in the log), so a
+  survival-phase position is set with `ctl command "tp @s …"` and read back from `.player.block_pos` before
+  anything relies on reach (`tp_to`).
+- **`ctl select <item>` needs a tick before a command reads the main hand**: without it the attach reported
+  "the attachment item is not in hand" with the item selected in the hotbar. `select_item` waits and reads
+  `.held.item` back.
+- A **side facing a chest cannot be right-clicked** (the chest occludes it), so the attractor placed by
+  right-click goes on a side facing air and the ones facing chests are placed by
+  `/moderndynamics attach … <kind>`; the readout is what proves the side.
+- `--offscreen`, not `--headless`: the recipe phase opens a real crafting-table menu (the same reason
+  `pocketstorage` and `additional_lights` launch offscreen for their craft phases).
+
+### Coverage — every family in the jar
+
+| family | status |
+|---|---|
+| `item_pipe` block: six connection states, multipart shape, outline, explosion-safe self drop | **tested** — A/C/E/F block states, `== the pipe drops itself` |
+| `item_pipe` item: give, read back, craft (8 per craft), place | **tested** — R, A–G |
+| `extractor` item + attachment: craft, right-click placement, command placement, cost, operation (4/40 ticks, nearest first, refusal) | **tested** — R, A–F, D |
+| `attractor` item + attachment: craft, right-click placement, command placement, cost, operation (4/40 ticks into its own side), "never from another attractor" | **tested** — R, F, G, G2, G3, admin phases |
+| carried recipes (pipe 8, extractor 1, attractor 1) | **tested** by `tools/recipe_check.py`: output id **and** count, grid emptied, ingredients consumed, plus a negative grid |
+| pipe loot table | **tested** — survival break drops exactly 1 |
+| creative tab + lang (data) | **not asserted in game** (data only; the item ids and names are proven by give/craft/placement) |
+| fluid pipe, the five energy cables (LV…EV, superconductor), machine extender | **not ported** — gap 1 |
+| filter, inhibitor, wrench (connection blacklist, attachment removal, off-hand rules) | **not ported** — gap 2 (next slice) |
+| attachment screen (filters, oversending, max items, redstone mode) and upgrade data (speed, count, frequency) | **not ported** — gap 2 (needs a menu/screen) |
+| routing modes FURTHEST/RANDOM/ROUND_ROBIN, priorities, stuffed-item retry | **not ported** — gap 3 (round robin is upgrade-gated upstream) |
+| item travel rendering, per-type arm textures, waterlogging, pickup/clone | **not ported** — gap 4 (client/deep work, outside this tier's slice) |
+| JEI/EMI/REI/Jade plugins, debug tool, config | **not ported** — gap 5 (integration/client) |
+
+Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices,rust-review

@@ -8,7 +8,7 @@
 #
 # Cargo's name and version are not the mod's identity: horizon-mod.toml is.
 name = "moderndynamics"
-version = "0.2.0"
+version = "0.2.2"
 edition = "2024"
 license = "LGPL-3.0-only"
 description = "Modern Dynamics for Horizon: an item pipe with an extractor attachment"

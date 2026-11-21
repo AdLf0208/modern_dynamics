@@ -1,0 +1,19 @@
+{
+  "category": "misc",
+  "key": {
+    "e": "minecraft:ender_pearl",
+    "m": "minecraft:iron_ingot",
+    "p": "minecraft:paper",
+    "r": "minecraft:redstone"
+  },
+  "pattern": [
+    " e ",
+    "mrm",
+    " p "
+  ],
+  "result": {
+    "count": 1,
+    "id": "moderndynamics:attractor"
+  },
+  "type": "minecraft:crafting_shaped"
+}

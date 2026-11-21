@@ -15,22 +15,25 @@ use std::collections::BTreeSet;
 
 use mod_api::{
     self, BlockEntityPart, BlockEntityRef, BlockEntityTickEvent, BlockEntityTicksEvent, BlockPart,
-    BlockUpdateFlags, Capability, Command, CommandArgumentValue, Compound, Direction, Flow, Hooks,
-    HostTransaction, ITEMS, InteractionResult, ItemPlace, ItemResource, LevelRef,
-    RegisterCommandsEvent, Registrar, RegistrationContext, ResourceHandler, RunModCommandEvent,
-    ServerHost, Tag, Text, UseItemOnEvent, move_resources,
+    BlockUpdateFlags, Capability, Command, CommandArgumentValue, Compound, Direction, Flow, Hand,
+    Hooks, HostTransaction, ITEMS, Identifier, InteractionResult, ItemPlace, ItemResource,
+    ItemStack, LevelRef, RegisterCommandsEvent, Registrar, RegistrationContext, ResourceHandler,
+    RunModCommandEvent, ServerHost, Tag, Text, UseItemOnEvent, move_resources,
 };
 
 use runtime::{
-    Attachments, Endpoint, FACE_COUNT, FACE_NAMES, Face, ITEMS_PER_OPERATION, Neighbour,
-    OPERATION_TICK_DELAY, Pos, connection_bits, destination_order, face_named, face_normal,
-    is_connected, is_operation_tick, phase_of, reachable, spend_budget, step,
+    ADMIN_LEVEL, AttachmentKind, Attachments, Endpoint, FACE_COUNT, FACE_NAMES, Face,
+    ITEMS_PER_OPERATION, MAX_NETWORK_PIPES, Neighbour, OPERATION_TICK_DELAY, Pos,
+    attractor_sources, connection_bits, destination_order, face_named, face_normal, is_connected,
+    is_operation_tick, may_administer, phase_of, reachable, spend_budget, step,
 };
 
 /// The item pipe block (and its item).
 const PIPE: &str = "moderndynamics:item_pipe";
 /// The extractor attachment item.
 const EXTRACTOR: &str = "moderndynamics:extractor";
+/// The attractor attachment item.
+const ATTRACTOR: &str = "moderndynamics:attractor";
 
 // The pipe's saved attachments are kept in the shapes a mod block entity's compound holds, as the
 // retired bundle saved them: one `attachments` int, a bit per side.
@@ -64,14 +67,23 @@ fn int(nbt: &Compound, name: &str) -> Option<i32> {
 
 /// A pipe's saved attachments; a fresh pipe has none.
 fn read_attachments(nbt: &Compound) -> Attachments {
-    match int(nbt, "attachments") {
-        Some(mask) => Attachments::from_saved(mask),
-        None => Attachments::new(),
-    }
+    Attachments::from_saved(
+        int(nbt, "attachments").unwrap_or(0),
+        int(nbt, "attractors").unwrap_or(0),
+    )
 }
 
 fn write_attachments(nbt: &mut Compound, attachments: &Attachments) {
-    put(nbt, "attachments", Tag::Int(attachments.saved()));
+    put(nbt, "attachments", Tag::Int(attachments.extractor_mask()));
+    put(nbt, "attractors", Tag::Int(attachments.attractor_mask()));
+}
+
+/// The item a kind is placed with, and the item it drops as.
+const fn item_of(kind: AttachmentKind) -> &'static str {
+    match kind {
+        AttachmentKind::Extractor => EXTRACTOR,
+        AttachmentKind::Attractor => ATTRACTOR,
+    }
 }
 
 /// The authoritative level the server ticks now: the one a block entity's tick belongs to (a
@@ -165,7 +177,10 @@ fn show_connections(host: &mut dyn ServerHost, level: LevelRef, pos: Pos, bits: 
     }
 }
 
-/// Every pipe reachable from `start` through pipe-to-pipe links.
+/// Every pipe reachable from `start` through pipe-to-pipe links, at most
+/// [`MAX_NETWORK_PIPES`] of them: the same budget the runtime's walk keeps, so a
+/// griefed or machine-built pipe line cannot make one operation walk it all. A set
+/// answers membership, as the runtime's walk does.
 fn network_of(
     host: &mut dyn ServerHost,
     level: LevelRef,
@@ -173,8 +188,10 @@ fn network_of(
     own: &Attachments,
 ) -> Vec<Pos> {
     let mut found = vec![start];
+    let mut seen: BTreeSet<Pos> = BTreeSet::new();
+    seen.insert(start);
     let mut next = 0;
-    while next < found.len() {
+    while next < found.len() && found.len() < MAX_NETWORK_PIPES {
         let pos = found[next];
         next += 1;
         let attachments = if pos == start {
@@ -187,8 +204,11 @@ fn network_of(
                 continue;
             }
             let beside = step(pos, face);
-            if !found.contains(&beside) {
+            if seen.insert(beside) {
                 found.push(beside);
+                if found.len() == MAX_NETWORK_PIPES {
+                    break;
+                }
             }
         }
     }
@@ -197,7 +217,9 @@ fn network_of(
 }
 
 /// The inventories the network's pipes reach, in pipe then face order. `own` is the ticked
-/// pipe's mask, which its out-of-the-world entity cannot be read for.
+/// pipe's mask, which its out-of-the-world entity cannot be read for. A side whose attachment
+/// is an extractor is not an endpoint: its inventory is what that extractor takes from
+/// (upstream's `allowsItemConnection`, false for a servo only).
 fn endpoints(
     host: &mut dyn ServerHost,
     level: LevelRef,
@@ -213,7 +235,9 @@ fn endpoints(
             attachments_at(host, level, pipe)
         };
         for face in 0..FACE_COUNT {
-            if neighbour(host, level, pipe, face, &attachments) == Neighbour::Inventory {
+            if attachments.accepts_endpoints(face)
+                && neighbour(host, level, pipe, face, &attachments) == Neighbour::Inventory
+            {
                 endpoints.push(Endpoint { pipe, face });
             }
         }
@@ -249,7 +273,7 @@ fn pipe_links(
 /// reaches an inventory moves up to [`ITEMS_PER_OPERATION`] items into the network's other
 /// endpoints, nearest first, one destination after another until the batch is spent.
 fn run_extractors(host: &mut dyn ServerHost, level: LevelRef, pos: Pos, own: &Attachments) {
-    if (0..FACE_COUNT).all(|face| !own.has(face)) {
+    if (0..FACE_COUNT).all(|face| own.kind(face) != Some(AttachmentKind::Extractor)) {
         return;
     }
     let Some(game_time) = level.game_time(host) else {
@@ -259,16 +283,22 @@ fn run_extractors(host: &mut dyn ServerHost, level: LevelRef, pos: Pos, own: &At
     if !is_operation_tick(game_time, phase_of(pos)) {
         return;
     }
+    // The extracting sides first: a pipe whose attachments all face air or another pipe has
+    // no source, so it never builds the network at all (six neighbour reads instead of a walk).
+    let sources: Vec<Face> = (0..FACE_COUNT)
+        .filter(|&face| own.kind(face) == Some(AttachmentKind::Extractor))
+        .filter(|&face| neighbour(host, level, pos, face, own) == Neighbour::Inventory)
+        .collect();
+    if sources.is_empty() {
+        return;
+    }
     let pipes = network_of(host, level, pos, own);
     let endpoints = endpoints(host, level, &pipes, pos, own);
     // `reachable` takes a read-only predicate, so the links are worked out first: the
     // neighbour read needs the host mutably.
     let links = pipe_links(host, level, &pipes, pos, own);
     let reach = reachable(&pipes, pos, |pipe, face| links.contains(&(pipe, face)));
-    for face in 0..FACE_COUNT {
-        if !own.has(face) || neighbour(host, level, pos, face, own) != Neighbour::Inventory {
-            continue;
-        }
+    for face in sources {
         let source = Endpoint { pipe: pos, face };
         let order = destination_order(&reach, &endpoints, source);
         if order.is_empty() {
@@ -303,8 +333,74 @@ fn run_extractors(host: &mut dyn ServerHost, level: LevelRef, pos: Pos, own: &At
     }
 }
 
-/// One server tick of a pipe: recompute its six connections, then let each extractor that falls
-/// on this tick move its batch.
+/// Run the attractor operations of the pipe at `pos` for this tick: each attractor side that
+/// faces an inventory pulls up to [`ITEMS_PER_OPERATION`] items out of the network's other
+/// inventories, nearest first, one source after another until the batch is spent (upstream's
+/// `ItemHost.tickAttractor`, the reverse of the extractor).
+fn run_attractors(host: &mut dyn ServerHost, level: LevelRef, pos: Pos, own: &Attachments) {
+    if (0..FACE_COUNT).all(|face| own.kind(face) != Some(AttachmentKind::Attractor)) {
+        return;
+    }
+    let Some(game_time) = level.game_time(host) else {
+        return;
+    };
+    let game_time = game_time.max(0) as u64;
+    if !is_operation_tick(game_time, phase_of(pos)) {
+        return;
+    }
+    // Only an attractor whose side reaches an inventory has anywhere to put its batch.
+    let targets: Vec<(Face, Capability<dyn ResourceHandler<ItemResource>>)> = (0..FACE_COUNT)
+        .filter(|&face| own.kind(face) == Some(AttachmentKind::Attractor))
+        .filter_map(|face| inventory(host, level, step(pos, face), face).map(|to| (face, to)))
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+    let pipes = network_of(host, level, pos, own);
+    let endpoints = endpoints(host, level, &pipes, pos, own);
+    let links = pipe_links(host, level, &pipes, pos, own);
+    let reach = reachable(&pipes, pos, |pipe, face| links.contains(&(pipe, face)));
+    // Which endpoint sides carry an attractor of their own: the predicate `attractor_sources`
+    // takes is read-only, so the masks are worked out first, as `pipe_links` does.
+    let mut attractor_sites: BTreeSet<(Pos, Face)> = BTreeSet::new();
+    for &pipe in &pipes {
+        let attachments = if pipe == pos {
+            *own
+        } else {
+            attachments_at(host, level, pipe)
+        };
+        for face in 0..FACE_COUNT {
+            if attachments.kind(face) == Some(AttachmentKind::Attractor) {
+                attractor_sites.insert((pipe, face));
+            }
+        }
+    }
+    for (face, to) in &targets {
+        let source = Endpoint {
+            pipe: pos,
+            face: *face,
+        };
+        let order = attractor_sources(&reach, &endpoints, source, |pipe, site| {
+            attractor_sites.contains(&(pipe, site))
+        });
+        spend_budget(ITEMS_PER_OPERATION, &order, |index, remaining| {
+            let endpoint = endpoints[index];
+            let Some(from) = inventory(
+                host,
+                level,
+                step(endpoint.pipe, endpoint.face),
+                endpoint.face,
+            ) else {
+                return 0;
+            };
+            host.transaction(|host, tx| move_resources(host, &from, to, |_| true, remaining, tx))
+                .unwrap_or(0)
+        });
+    }
+}
+
+/// One server tick of a pipe: recompute its six connections, then let each attachment that falls
+/// on this tick move its batch — the extractors out of their sides, the attractors into theirs.
 fn pipe_tick(host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
     let Some(level) = in_place_level(host) else {
         return;
@@ -314,8 +410,9 @@ fn pipe_tick(host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
     let bits = connection_bits(neighbours(host, level, pos, &own));
     show_connections(host, level, pos, bits);
     // The transfer reads the saved mask, so the tick's nbt snapshot is taken before any
-    // property write: the extractor mask itself is not changed by a tick.
+    // property write: the attachment masks themselves are not changed by a tick.
     run_extractors(host, level, pos, &own);
+    run_attractors(host, level, pos, &own);
 }
 
 /// The face a clicked normal names, if it names one.
@@ -323,16 +420,16 @@ fn face_of_normal(normal: [i32; 3]) -> Option<Face> {
     (0..FACE_COUNT).find(|&face| face_normal(face) == normal)
 }
 
-/// Set or clear the extractor on one side of the pipe at `pos`. Answers whether it could be
-/// written. Used by the right-click placement and by the `/moderndynamics attach|detach` harness
-/// path: upstream decides the side from the click *point* on the connector, which the pin's
-/// hooks only give as the clicked face.
+/// Set one side of the pipe at `pos` to `kind`, or clear it with `None`. Answers whether it
+/// could be written. Used by the right-click placement and by the `/moderndynamics attach|detach`
+/// harness path: upstream decides the side from the click *point* on the connector, which the
+/// pin's hooks only give as the clicked face.
 fn set_attachment(
     host: &mut dyn ServerHost,
     level: LevelRef,
     pos: Pos,
     face: Face,
-    on: bool,
+    kind: Option<AttachmentKind>,
 ) -> bool {
     let Some(entity) = pipe_at(host, level, pos) else {
         return false;
@@ -340,7 +437,7 @@ fn set_attachment(
     let Some(mut data) = entity.data(host) else {
         return false;
     };
-    let attachments = read_attachments(&data).with(face, on);
+    let attachments = read_attachments(&data).with(face, kind);
     write_attachments(&mut data, &attachments);
     entity.replace_data(host, data).is_ok()
 }
@@ -369,14 +466,14 @@ fn tell(host: &mut dyn ServerHost, player: u128, line: String) {
 }
 
 /// The item pipe: its block entity (the saved attachments and the tick) and its block (the
-/// right-click placement with an extractor).
+/// right-click placement with an attachment item).
 struct Pipe;
 
 #[mod_api::horizon_part]
 impl BlockPart for Pipe {
-    /// Right-clicking a pipe with an extractor places it on the clicked side, as upstream's
-    /// `PipeBlockEntity.useItemOn` does; the item is consumed outside creative. A side that
-    /// already carries one is left for the (unported) screen.
+    /// Right-clicking a pipe with an extractor or an attractor places it on the clicked side, as
+    /// upstream's `PipeBlockEntity.useItemOn` does; the item is consumed outside creative. A side
+    /// that already carries one is left for the (unported) screen.
     fn use_item_on(
         &self,
         host: &mut dyn ServerHost,
@@ -384,20 +481,24 @@ impl BlockPart for Pipe {
     ) -> Option<InteractionResult> {
         let click = event.click;
         let stack = click.stack?;
-        if stack.item().id(host) != EXTRACTOR {
-            return None;
-        }
+        let held = stack.item().id(host);
+        let kind = match held.as_str() {
+            EXTRACTOR => AttachmentKind::Extractor,
+            ATTRACTOR => AttachmentKind::Attractor,
+            _ => return None,
+        };
         let level = in_place_level(host)?;
         let face = face_of_normal(click.hit.face)?;
         let entity = pipe_at(host, level, click.pos)?;
         let data = entity.data(host)?;
-        if read_attachments(&data).has(face) {
+        if let Some(already) = read_attachments(&data).kind(face) {
             // Upstream opens the attachment's screen here; this slice has no screen.
             tell(
                 host,
                 click.player,
                 format!(
-                    "Modern Dynamics: this side already has an extractor ({})",
+                    "Modern Dynamics: this side already has an {} ({})",
+                    already.name(),
                     FACE_NAMES[face]
                 ),
             );
@@ -405,7 +506,7 @@ impl BlockPart for Pipe {
         }
         // One item leaves the hand and the side gets the attachment, or neither happens: both
         // writes share a transaction, so a failed placement never eats the item and a lost item
-        // never leaves a free extractor behind. A creative player's hand gives without losing
+        // never leaves a free attachment behind. A creative player's hand gives without losing
         // any, as upstream's `stack.shrink` guard does.
         let place = ItemPlace::PlayerHand {
             player: click.player,
@@ -417,7 +518,7 @@ impl BlockPart for Pipe {
                 if place.extract(host, tx, &resource, 1) == 0 {
                     return Err(());
                 }
-                if set_attachment(host, level, click.pos, face, true) {
+                if set_attachment(host, level, click.pos, face, Some(kind)) {
                     Ok(())
                 } else {
                     Err(())
@@ -431,7 +532,8 @@ impl BlockPart for Pipe {
             host,
             click.player,
             format!(
-                "Modern Dynamics: extractor placed on the {} side",
+                "Modern Dynamics: {} placed on the {} side",
+                kind.name(),
                 FACE_NAMES[face]
             ),
         );
@@ -462,16 +564,20 @@ impl Hooks for Mod {
         let _ = r.block_entity_part(&kind, Pipe);
     }
 
-    /// `/moderndynamics info|attach|detach`.
+    /// `/moderndynamics info|attach|detach`. `info` is a readout of the pipe a player names
+    /// and needs no authority; `attach`/`detach` edit another player's pipe from any
+    /// distance, so they are registered at the operator level `/setblock` needs.
     fn register_commands(&self, _host: &mut dyn ServerHost, event: &mut RegisterCommandsEvent<'_>) {
         event
             .commands
             .push(Command::new("moderndynamics info <pos:block_pos>"));
-        event.commands.push(Command::new(
-            "moderndynamics attach <pos:block_pos> <side:word>",
+        event.commands.push(Command::op(
+            "moderndynamics attach <pos:block_pos> <side:word> [kind:word]",
+            ADMIN_LEVEL,
         ));
-        event.commands.push(Command::new(
+        event.commands.push(Command::op(
             "moderndynamics detach <pos:block_pos> <side:word>",
+            ADMIN_LEVEL,
         ));
     }
 
@@ -534,21 +640,33 @@ impl Hooks for Mod {
                 feedback(
                     host,
                     &format!(
-                        "Item Pipe at {},{},{}: extractors {}; {} items every {} ticks",
+                        "Item Pipe at {},{},{}: extractors {}; attractors {}; {} items every {} ticks",
                         pos[0],
                         pos[1],
                         pos[2],
-                        face_list(|face| attachments.has(face)),
+                        face_list(|face| attachments.kind(face) == Some(AttachmentKind::Extractor)),
+                        face_list(|face| attachments.kind(face) == Some(AttachmentKind::Attractor)),
                         ITEMS_PER_OPERATION,
                         OPERATION_TICK_DELAY
                     ),
                 );
             }
             _ => {
+                // Defence in depth: the tree already refuses a usage below its level, but a
+                // merged command tree is not a guarantee this body should rely on.
+                if !may_administer(event.source.permission().level()) {
+                    feedback(
+                        host,
+                        &format!(
+                            "Modern Dynamics: /moderndynamics {action} needs an operator (permission level {ADMIN_LEVEL})."
+                        ),
+                    );
+                    return Flow::Cancel;
+                }
                 let Some(CommandArgumentValue::String(side)) = invocation.argument("side") else {
                     feedback(
                         host,
-                        "Usage: /moderndynamics attach|detach <x> <y> <z> <side>",
+                        "Usage: /moderndynamics attach <x> <y> <z> <side> [extractor|attractor], detach <x> <y> <z> <side>",
                     );
                     return Flow::Cancel;
                 };
@@ -559,21 +677,107 @@ impl Hooks for Mod {
                     );
                     return Flow::Cancel;
                 };
-                let on = action == "attach";
-                if !set_attachment(host, level, pos, face, on) {
-                    feedback(host, "Modern Dynamics: no item pipe there.");
+                // `attach` without a kind is the extractor, as the extractor-only slice's
+                // form always meant; `detach` clears whatever the side carries.
+                let kind = if action == "attach" {
+                    match invocation.argument("kind") {
+                        None => Some(AttachmentKind::Extractor),
+                        Some(CommandArgumentValue::String(word)) => {
+                            let named = AttachmentKind::named(&word.to_lowercase());
+                            if named.is_none() {
+                                feedback(
+                                    host,
+                                    &format!(
+                                        "Unknown attachment '{word}': extractor or attractor."
+                                    ),
+                                );
+                                return Flow::Cancel;
+                            }
+                            named
+                        }
+                        Some(_) => {
+                            feedback(
+                                host,
+                                "Usage: /moderndynamics attach <x> <y> <z> <side> [extractor|attractor]",
+                            );
+                            return Flow::Cancel;
+                        }
+                    }
+                } else {
+                    None
+                };
+                if !set_attachment_command(host, level, pos, face, kind, attach_payer(event)) {
+                    feedback(
+                        host,
+                        "Modern Dynamics: no item pipe there, or the attachment item is not in hand.",
+                    );
                     return Flow::Cancel;
                 }
                 feedback(
                     host,
                     &format!(
-                        "Item Pipe: extractor on the {} side {}",
+                        "Item Pipe: {} on the {} side {}",
+                        kind.unwrap_or(AttachmentKind::Extractor).name(),
                         FACE_NAMES[face],
-                        if on { "on" } else { "off" }
+                        if kind.is_some() { "on" } else { "off" }
                     ),
                 );
             }
         }
         Flow::Cancel
     }
+}
+
+/// Who pays for an `/moderndynamics attach`: the acting player's main hand, or nobody when the
+/// source has no hand (the console, a command block, a function). The administrative path is an
+/// operator's, so its write is the write `/setblock` makes; the item is still the player's cost
+/// when a player is the one attaching, exactly as the right-click path charges it.
+fn attach_payer(event: &RunModCommandEvent<'_>) -> Option<u128> {
+    match event.source {
+        mod_api::CommandSource::Player { player, .. } => Some(player.uuid()),
+        _ => None,
+    }
+}
+
+/// Set one side to `kind`, or clear it, from a command: an `attach` from a player takes that
+/// kind's item from the player's main hand inside the same transaction as the mask write (so a
+/// refused placement never eats an item, and a lost item never leaves a free attachment behind).
+/// `detach` costs nothing and never returns the item, as upstream's wrench takes it off.
+fn set_attachment_command(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: Pos,
+    face: Face,
+    kind: Option<AttachmentKind>,
+    payer: Option<u128>,
+) -> bool {
+    let Some(kind) = kind else {
+        return set_attachment(host, level, pos, face, None);
+    };
+    let Some(player) = payer else {
+        // No hand: the console's own path costs nothing, as `/setblock` does.
+        return set_attachment(host, level, pos, face, Some(kind));
+    };
+    let Some(id) = Identifier::parse_namespaced(item_of(kind)) else {
+        return false;
+    };
+    let Some(key) = host.item_key(&id) else {
+        return false;
+    };
+    let resource = ItemResource::of(&ItemStack::of(key));
+    let place = ItemPlace::PlayerHand {
+        player,
+        hand: Hand::Main,
+    };
+    host.transaction(|host, tx| {
+        if place.extract(host, tx, &resource, 1) == 0 {
+            return Err(());
+        }
+        if set_attachment(host, level, pos, face, Some(kind)) {
+            Ok(())
+        } else {
+            Err(())
+        }
+    })
+    .is_ok()
 }
